@@ -1,0 +1,147 @@
+server:
+  port: 8080
+  # Graceful shutdown: drain in-flight requests before stopping
+  shutdown: graceful
+  servlet:
+    context-path: /api
+  compression:
+    enabled: true
+    mime-types: application/json,application/xml,text/html
+    min-response-size: 1024
+
+spring:
+  application:
+    name: barley-service
+
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+
+  # ── Database ────────────────────────────────────────────────
+  datasource:
+    url: jdbc:h2:mem:barleydb;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+    # HikariCP connection pool (production-grade settings)
+    hikari:
+      pool-name: BarleyHikariPool
+      minimum-idle: 5
+      maximum-pool-size: 20
+      idle-timeout: 300000        # 5 min
+      connection-timeout: 20000   # 20 sec
+      max-lifetime: 1200000       # 20 min
+      leak-detection-threshold: 60000   # log if conn held > 60s
+
+  jpa:
+    hibernate:
+      ddl-auto: validate   # NEVER use create/update in production; Flyway manages schema
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+        dialect: org.hibernate.dialect.H2Dialect
+        jdbc:
+          batch_size: 50       # batch inserts/updates
+        order_inserts: true
+        order_updates: true
+
+  # H2 console (DEV only — disable in production)
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+
+  # ── Flyway Migrations ──────────────────────────────────────
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  # ── Cache ─────────────────────────────────────────────────
+  cache:
+    type: caffeine
+    caffeine:
+      spec: maximumSize=1000,expireAfterWrite=10m
+
+  # ── Async / Thread Pool ───────────────────────────────────
+  task:
+    execution:
+      pool:
+        core-size: 8
+        max-size: 32
+        queue-capacity: 500
+        keep-alive: 60s
+      thread-name-prefix: barley-async-
+
+# ── Actuator / Observability ──────────────────────────────────
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,loggers,threaddump,heapdump
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: always
+      show-components: always
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+# ── Resilience4j ──────────────────────────────────────────────
+resilience4j:
+  circuitbreaker:
+    instances:
+      barleyExternalService:
+        # Open circuit after 50% failures in a 10-call sliding window
+        failure-rate-threshold: 50
+        slow-call-rate-threshold: 80
+        slow-call-duration-threshold: 2s
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+
+  retry:
+    instances:
+      barleyExternalService:
+        max-attempts: 3
+        wait-duration: 500ms
+        exponential-backoff-multiplier: 2
+        retry-exceptions:
+          - java.io.IOException
+          - java.util.concurrent.TimeoutException
+
+  ratelimiter:
+    instances:
+      barleyApi:
+        limit-for-period: 100        # 100 requests
+        limit-refresh-period: 1s     # per second
+        timeout-duration: 0s
+
+  bulkhead:
+    instances:
+      barleyService:
+        max-concurrent-calls: 20
+        max-wait-duration: 100ms
+
+# ── JWT Security ──────────────────────────────────────────────
+barley:
+  security:
+    jwt:
+      # In production: inject from environment variable / secrets manager
+      secret: "barley-super-secret-key-change-in-production-min-256-bits"
+      expiration-ms: 86400000   # 24 hours
+
+# ── Logging ───────────────────────────────────────────────────
+logging:
+  level:
+    root: INFO
+    com.barley: DEBUG
+    org.springframework.security: INFO
+    org.hibernate.SQL: DEBUG
+    org.hibernate.type.descriptor.sql: TRACE
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level [%X{traceId}] %logger{36} - %msg%n"
